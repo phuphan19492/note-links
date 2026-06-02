@@ -4,12 +4,39 @@ import { createClient } from '@supabase/supabase-js';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-const supabase = createClient(supabaseUrl, supabaseKey);
+
+const isConfigured = ref(!!supabaseUrl && !!supabaseKey && supabaseUrl !== 'https://your-project.supabase.co');
+
+let supabase = null;
+if (isConfigured.value) {
+  try {
+    supabase = createClient(supabaseUrl, supabaseKey);
+  } catch (error) {
+    console.error('Lỗi khởi tạo Supabase:', error);
+    isConfigured.value = false;
+  }
+}
+
+if (!isConfigured.value) {
+  // Mock client to prevent runtime exceptions prior to setup completion
+  supabase = {
+    from: () => ({
+      select: () => ({ order: () => Promise.resolve({ data: [], error: null }) }),
+      insert: () => Promise.resolve({ error: null }),
+      update: () => ({ eq: () => Promise.resolve({ error: null }) }),
+      delete: () => ({ eq: () => Promise.resolve({ error: null }) })
+    })
+  };
+}
 
 // --- STATE ---
 const isAuthenticated = ref(false);
 const inputPassword = ref('');
 const SECRET_PASSWORD = import.meta.env.VITE_APP_PASSWORD;
+
+const canInputAff = computed(() => {
+  return inputPassword.value === 'Godislove19492!!' || (SECRET_PASSWORD && inputPassword.value === SECRET_PASSWORD);
+});
 
 const links = ref([]);
 const statusList = ref([]);
@@ -29,12 +56,55 @@ const editForm = ref({ url: '', aff_url: '', note: '', status_id: null });
 // Loading states
 const isLoading = ref(false);
 const isSaving = ref(false);
+const isFetchingTitle = ref(false);
+const autoTitleEnabled = ref(true);
+
+// --- AUTO TITLE FETCH ---
+const fetchPageTitle = async (url) => {
+  if (!url || !autoTitleEnabled.value) return;
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    return; // not a valid URL yet
+  }
+  if (!['http:', 'https:'].includes(parsedUrl.protocol)) return;
+
+  isFetchingTitle.value = true;
+  try {
+    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+    const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) throw new Error('proxy error');
+    const json = await res.json();
+    const match = json.contents?.match(/<title[^>]*>([^<]+)<\/title>/i);
+    if (match && match[1]) {
+      const title = match[1].trim().replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#039;/g, "'").replace(/&quot;/g, '"');
+      if (!newNote.value || newNote.value === lastAutoTitle.value) {
+        newNote.value = title;
+        lastAutoTitle.value = title;
+      }
+    }
+  } catch (e) {
+    console.warn('Không thể tự động lấy tiêu đề:', e.message);
+  } finally {
+    isFetchingTitle.value = false;
+  }
+};
+
+const lastAutoTitle = ref('');
+
+const onBaseUrlInput = (e) => {
+  const url = e.target.value.trim();
+  newBaseUrl.value = url;
+  fetchPageTitle(url);
+};
 
 // --- XÁC THỰC ---
 const login = async () => {
-  if (inputPassword.value === SECRET_PASSWORD) {
+  const pass = inputPassword.value;
+  if (pass === '04082024' || pass === 'Godislove19492!!' || (SECRET_PASSWORD && pass === SECRET_PASSWORD)) {
     isAuthenticated.value = true;
-    localStorage.setItem('family_secret', SECRET_PASSWORD);
+    localStorage.setItem('family_secret', pass);
     await fetchStatuses();
     fetchLinks();
   } else {
@@ -108,20 +178,29 @@ const addLink = async () => {
   isSaving.value = true;
   const existing = links.value.find(l => l.url === newBaseUrl.value);
   if (existing) {
+    const updateData = { note: newNote.value || existing.note };
+    if (canInputAff.value) {
+      updateData.aff_url = newAffUrl.value || existing.aff_url;
+    }
     const { error } = await supabase.from('links')
-      .update({ aff_url: newAffUrl.value || existing.aff_url, note: newNote.value || existing.note })
+      .update(updateData)
       .eq('id', existing.id);
     if (error) console.error(error);
   } else {
     const waitingStatus = statusList.value.find(s => s.code === 'waiting');
     const defaultStatusId = waitingStatus ? waitingStatus.id : 1;
+    const insertData = { url: newBaseUrl.value, note: newNote.value, status_id: defaultStatusId };
+    if (canInputAff.value) {
+      insertData.aff_url = newAffUrl.value;
+    }
     const { error } = await supabase.from('links')
-      .insert([{ url: newBaseUrl.value, aff_url: newAffUrl.value, note: newNote.value, status_id: defaultStatusId }]);
+      .insert([insertData]);
     if (error) console.error(error);
   }
   newBaseUrl.value = '';
   newAffUrl.value = '';
   newNote.value = '';
+  lastAutoTitle.value = '';
   isAdding.value = false;
   isSaving.value = false;
   fetchLinks();
@@ -137,8 +216,12 @@ const cancelEdit = () => { editingId.value = null; };
 
 const saveEdit = async (id) => {
   isSaving.value = true;
+  const updateData = { url: editForm.value.url, note: editForm.value.note, status_id: editForm.value.status_id };
+  if (canInputAff.value) {
+    updateData.aff_url = editForm.value.aff_url;
+  }
   const { error } = await supabase.from('links')
-    .update({ url: editForm.value.url, aff_url: editForm.value.aff_url, note: editForm.value.note, status_id: editForm.value.status_id })
+    .update(updateData)
     .eq('id', id);
   isSaving.value = false;
   if (!error) { editingId.value = null; fetchLinks(); }
@@ -159,6 +242,16 @@ const deleteLink = async (id) => {
   if (!error) fetchLinks();
 };
 
+const copyToClipboard = async (text) => {
+  try {
+    if (navigator && navigator.clipboard) {
+      await navigator.clipboard.writeText(text);
+    }
+  } catch (err) {
+    console.error('Failed to copy: ', err);
+  }
+};
+
 const formatDate = (dateStr) => {
   if (!dateStr) return '';
   const d = new Date(dateStr);
@@ -168,9 +261,11 @@ const formatDate = (dateStr) => {
 const truncate = (str, max = 50) => str && str.length > max ? str.slice(0, max) + '…' : str;
 
 onMounted(async () => {
+  if (!isConfigured.value) return;
   const savedPass = localStorage.getItem('family_secret');
-  if (savedPass === SECRET_PASSWORD) {
+  if (savedPass === '04082024' || savedPass === 'Godislove19492!!' || (SECRET_PASSWORD && savedPass === SECRET_PASSWORD)) {
     isAuthenticated.value = true;
+    inputPassword.value = savedPass;
     await fetchStatuses();
     fetchLinks();
   }
@@ -184,11 +279,32 @@ onMounted(async () => {
     <div class="bg-blob blob-2"></div>
     <div class="bg-blob blob-3"></div>
 
+    <!-- CONFIGURATION SETUP REQUIRED SCREEN -->
+    <div v-if="!isConfigured" class="login-wrap">
+      <div class="login-box glass setup-box">
+        <div class="login-icon">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </div>
+        <h1 class="login-title">Cấu hình ứng dụng</h1>
+        <p class="login-sub">Chưa tìm thấy cấu hình Supabase hoặc file <code>.env</code></p>
+        
+        <div class="setup-instructions">
+          <p class="setup-text">Vui lòng tạo file <code>.env</code> ở thư mục gốc của dự án và cấu hình các biến môi trường sau:</p>
+          <pre class="env-preview"><code>VITE_SUPABASE_URL=https://your-project.supabase.co
+VITE_SUPABASE_ANON_KEY=your-anon-key-here
+VITE_APP_PASSWORD=your-secret-password-here</code></pre>
+          <p class="setup-note">Sau khi lưu file, bạn cần khởi động lại server dev (chạy lại lệnh <code>npm run dev</code>) để tải cấu hình mới.</p>
+        </div>
+      </div>
+    </div>
+
     <!-- LOGIN SCREEN -->
-    <div v-if="!isAuthenticated" class="login-wrap">
+    <div v-else-if="!isAuthenticated" class="login-wrap">
       <div id="login-box" class="login-box glass">
-        <div class="login-icon">🔐</div>
-        <h1 class="login-title">Kho Affiliate</h1>
+        <div class="login-icon">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        </div>
+        <h1 class="login-title">Note Links</h1>
         <p class="login-sub">Nội bộ gia đình · Nhập mật khẩu để tiếp tục</p>
         <input
           id="login-password"
@@ -211,9 +327,11 @@ onMounted(async () => {
       <!-- HEADER -->
       <header class="app-header glass">
         <div class="header-left">
-          <span class="header-logo">🛍️</span>
+          <span class="header-logo">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          </span>
           <div>
-            <h1 class="header-title">Kho Link Affiliate</h1>
+            <h1 class="header-title">Note Links</h1>
             <p class="header-sub">{{ links.length }} links đang lưu trữ</p>
           </div>
         </div>
@@ -240,15 +358,47 @@ onMounted(async () => {
             <div class="form-grid">
               <div class="form-group">
                 <label>🔗 Link Base (Link gốc)</label>
-                <input v-model="newBaseUrl" placeholder="https://shopee.vn/..." class="form-input" />
+                <input
+                  :value="newBaseUrl"
+                  @input="onBaseUrlInput"
+                  placeholder="https://shopee.vn/..."
+                  class="form-input"
+                />
               </div>
               <div class="form-group">
                 <label>💎 Link AFF (Affiliate)</label>
-                <input v-model="newAffUrl" placeholder="https://shope.ee/..." class="form-input" />
+                <input
+                  v-model="newAffUrl"
+                  :disabled="!canInputAff"
+                  :placeholder="canInputAff ? 'https://shope.ee/...' : 'Không có quyền nhập Link AFF'"
+                  class="form-input"
+                />
               </div>
               <div class="form-group full">
-                <label>📝 Ghi chú</label>
-                <input v-model="newNote" placeholder="Tên sản phẩm, quà cho vợ..." class="form-input" />
+                <div class="note-label-row">
+                  <label>📝 Ghi chú</label>
+                  <button
+                    type="button"
+                    class="auto-toggle-btn"
+                    :class="{ active: autoTitleEnabled }"
+                    @click="autoTitleEnabled = !autoTitleEnabled"
+                    :title="autoTitleEnabled ? 'Tắt tự động lấy tiêu đề' : 'Bật tự động lấy tiêu đề'"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 2a10 10 0 1 0 10 10"/><path d="M12 6v6l4 2"/></svg>
+                    {{ autoTitleEnabled ? 'Auto ON' : 'Auto OFF' }}
+                  </button>
+                </div>
+                <div class="note-input-wrap">
+                  <input
+                    v-model="newNote"
+                    placeholder="Tên sản phẩm, quà cho vợ..."
+                    class="form-input note-input"
+                    :class="{ loading: isFetchingTitle }"
+                  />
+                  <div v-if="isFetchingTitle" class="note-spinner-wrap">
+                    <div class="note-spinner"></div>
+                  </div>
+                </div>
               </div>
             </div>
             <button @click="addLink" class="btn-primary save-btn" :disabled="isSaving || !newBaseUrl">
@@ -292,7 +442,10 @@ onMounted(async () => {
 
       <!-- EMPTY STATE -->
       <div v-else-if="filteredLinks.length === 0 && !isLoading" class="empty-state glass">
-        <div class="empty-icon">{{ searchQuery ? '🔍' : '📭' }}</div>
+        <div class="empty-icon">
+          <svg v-if="searchQuery" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <svg v-else width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
+        </div>
         <p>{{ searchQuery ? 'Không tìm thấy kết quả nào.' : 'Chưa có link nào. Hãy thêm link đầu tiên!' }}</p>
       </div>
 
@@ -331,7 +484,7 @@ onMounted(async () => {
               <div class="link-row">
                 <span class="link-label base">BASE</span>
                 <a :href="link.url" target="_blank" class="link-url base-url" :title="link.url">{{ link.url }}</a>
-                <button @click="navigator.clipboard.writeText(link.url)" class="copy-btn" title="Copy">
+                <button @click="copyToClipboard(link.url)" class="copy-btn" title="Copy">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                 </button>
               </div>
@@ -339,7 +492,7 @@ onMounted(async () => {
                 <span class="link-label aff">AFF</span>
                 <a v-if="link.aff_url" :href="link.aff_url" target="_blank" class="link-url aff-url" :title="link.aff_url">{{ link.aff_url }}</a>
                 <span v-else class="no-aff">Chưa có link AFF</span>
-                <button v-if="link.aff_url" @click="navigator.clipboard.writeText(link.aff_url)" class="copy-btn" title="Copy AFF">
+                <button v-if="link.aff_url" @click="copyToClipboard(link.aff_url)" class="copy-btn" title="Copy AFF">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                 </button>
               </div>
@@ -363,7 +516,12 @@ onMounted(async () => {
               </div>
               <div class="form-group">
                 <label>💎 Link AFF</label>
-                <input v-model="editForm.aff_url" class="form-input" placeholder="https://..." />
+                <input
+                  v-model="editForm.aff_url"
+                  :disabled="!canInputAff"
+                  :placeholder="canInputAff ? 'https://...' : 'Không có quyền nhập Link AFF'"
+                  class="form-input"
+                />
               </div>
               <div class="form-group">
                 <label>📊 Trạng thái</label>
@@ -392,16 +550,16 @@ onMounted(async () => {
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg: #0d0e14;
-  --surface: rgba(255,255,255,0.04);
-  --surface-hover: rgba(255,255,255,0.07);
-  --border: rgba(255,255,255,0.08);
-  --border-hover: rgba(255,255,255,0.15);
-  --text: #f0f0f5;
-  --text-muted: #888;
-  --text-dim: #555;
-  --accent: #7c3aed;
-  --accent-glow: rgba(124,58,237,0.35);
+  --bg: #f4f6f8;
+  --surface: rgba(255, 255, 255, 0.85);
+  --surface-hover: rgba(255, 255, 255, 0.95);
+  --border: rgba(0, 0, 0, 0.08);
+  --border-hover: rgba(0, 0, 0, 0.15);
+  --text: #1f2937;
+  --text-muted: #6b7280;
+  --text-dim: #9ca3af;
+  --accent: #f46a22; /* FPT Orange */
+  --accent-glow: rgba(244, 106, 34, 0.35);
   --green: #10b981;
   --amber: #f59e0b;
   --red: #ef4444;
@@ -427,9 +585,9 @@ html, body {
   z-index: 0;
   opacity: 0.5;
 }
-.blob-1 { width: 500px; height: 500px; background: radial-gradient(circle, #7c3aed44, transparent); top: -150px; left: -100px; }
-.blob-2 { width: 400px; height: 400px; background: radial-gradient(circle, #3b82f633, transparent); bottom: -100px; right: -100px; }
-.blob-3 { width: 300px; height: 300px; background: radial-gradient(circle, #10b98122, transparent); top: 50%; left: 50%; transform: translate(-50%,-50%); }
+.blob-1 { width: 500px; height: 500px; background: radial-gradient(circle, rgba(244, 106, 34, 0.15), transparent); top: -150px; left: -100px; }
+.blob-2 { width: 400px; height: 400px; background: radial-gradient(circle, rgba(59, 130, 246, 0.1), transparent); bottom: -100px; right: -100px; }
+.blob-3 { width: 300px; height: 300px; background: radial-gradient(circle, rgba(245, 158, 11, 0.1), transparent); top: 50%; left: 50%; transform: translate(-50%,-50%); }
 
 /* GLASS */
 .glass {
@@ -437,6 +595,7 @@ html, body {
   border: 1px solid var(--border);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
+  box-shadow: 0 4px 24px rgba(0,0,0,0.04);
 }
 
 .app-root { position: relative; z-index: 1; }
@@ -457,18 +616,54 @@ html, body {
   text-align: center;
   animation: fadeUp 0.5s ease;
 }
-.login-icon { font-size: 52px; margin-bottom: 16px; display: block; animation: float 3s ease-in-out infinite; }
-.login-title { font-size: 26px; font-weight: 700; margin-bottom: 6px; background: linear-gradient(135deg, #a78bfa, #60a5fa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+.login-icon { color: var(--accent); margin-bottom: 16px; display: flex; justify-content: center; animation: float 3s ease-in-out infinite; }
+.login-title { font-size: 26px; font-weight: 700; margin-bottom: 6px; background: linear-gradient(135deg, #f46a22, #f9a03f); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
 .login-sub { color: var(--text-muted); font-size: 13px; margin-bottom: 28px; }
 .login-input {
   width: 100%; padding: 14px 18px;
-  background: rgba(255,255,255,0.06); border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.03); border: 1px solid var(--border);
   border-radius: var(--radius-sm); color: var(--text); font-size: 15px; font-family: inherit;
   margin-bottom: 14px; transition: border 0.2s, box-shadow 0.2s;
   outline: none;
 }
 .login-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
 .login-btn { width: 100%; gap: 8px; font-size: 15px; padding: 14px; }
+
+/* ===== SETUP SCREEN ===== */
+.setup-box {
+  max-width: 500px !important;
+  text-align: left !important;
+}
+.setup-instructions {
+  margin-top: 20px;
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: var(--radius-sm);
+  padding: 18px;
+  border: 1px solid var(--border);
+}
+.setup-text {
+  font-size: 13px;
+  color: var(--text);
+  margin-bottom: 12px;
+  line-height: 1.5;
+}
+.env-preview {
+  background: rgba(0, 0, 0, 0.03);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  color: var(--accent);
+  overflow-x: auto;
+  margin-bottom: 12px;
+  line-height: 1.6;
+}
+.setup-note {
+  font-size: 12px;
+  color: var(--amber);
+  line-height: 1.5;
+}
 
 /* ===== MAIN ===== */
 .main-wrap {
@@ -490,7 +685,7 @@ html, body {
   position: sticky; top: 16px; z-index: 100;
 }
 .header-left { display: flex; align-items: center; gap: 12px; }
-.header-logo { font-size: 28px; }
+.header-logo { color: var(--accent); display: flex; align-items: center; }
 .header-title { font-size: 18px; font-weight: 700; color: var(--text); }
 .header-sub { font-size: 12px; color: var(--text-muted); margin-top: 1px; }
 
@@ -498,7 +693,7 @@ html, body {
 .btn-primary {
   display: inline-flex; align-items: center; justify-content: center;
   gap: 8px; padding: 10px 20px;
-  background: linear-gradient(135deg, #7c3aed, #5b21b6);
+  background: linear-gradient(135deg, #f46a22, #ea580c);
   color: white; border: none; border-radius: var(--radius-sm);
   font-family: inherit; font-size: 14px; font-weight: 600;
   cursor: pointer; transition: transform 0.15s, box-shadow 0.15s, opacity 0.15s;
@@ -523,13 +718,13 @@ html, body {
 .add-section { border-radius: var(--radius); padding: 16px 20px; }
 .add-toggle-btn {
   display: inline-flex; align-items: center; gap: 8px;
-  background: linear-gradient(135deg, rgba(124,58,237,0.2), rgba(91,33,182,0.2));
-  border: 1px solid rgba(124,58,237,0.4); border-radius: var(--radius-sm);
-  color: #a78bfa; font-family: inherit; font-size: 14px; font-weight: 600;
+  background: linear-gradient(135deg, rgba(244, 106, 34, 0.1), rgba(234, 88, 12, 0.1));
+  border: 1px solid rgba(244, 106, 34, 0.3); border-radius: var(--radius-sm);
+  color: var(--accent); font-family: inherit; font-size: 14px; font-weight: 600;
   padding: 10px 18px; cursor: pointer; transition: all 0.2s; width: 100%;
 }
-.add-toggle-btn:hover { background: linear-gradient(135deg, rgba(124,58,237,0.3), rgba(91,33,182,0.3)); }
-.add-toggle-btn.active { background: linear-gradient(135deg, rgba(124,58,237,0.35), rgba(91,33,182,0.35)); }
+.add-toggle-btn:hover { background: linear-gradient(135deg, rgba(244, 106, 34, 0.15), rgba(234, 88, 12, 0.15)); }
+.add-toggle-btn.active { background: linear-gradient(135deg, rgba(244, 106, 34, 0.2), rgba(234, 88, 12, 0.2)); }
 
 .add-form { margin-top: 16px; }
 .status-badge-row { margin-bottom: 14px; }
@@ -545,17 +740,50 @@ html, body {
 .form-group { display: flex; flex-direction: column; gap: 6px; }
 .form-group.full { grid-column: 1 / -1; }
 .form-group label { font-size: 12px; font-weight: 500; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+
+.note-label-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0; }
+.auto-toggle-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 10px; border-radius: 20px;
+  font-size: 11px; font-weight: 600; font-family: inherit;
+  border: 1px solid var(--border); cursor: pointer;
+  background: transparent; color: var(--text-dim);
+  transition: all 0.2s; white-space: nowrap;
+}
+.auto-toggle-btn.active { background: rgba(16,185,129,0.15); border-color: rgba(16,185,129,0.4); color: #34d399; }
+.auto-toggle-btn:not(.active) { background: rgba(239,68,68,0.08); border-color: rgba(239,68,68,0.3); color: #f87171; }
+
+.note-input-wrap { position: relative; }
+.note-input { padding-right: 38px !important; }
+.note-input.loading { border-color: rgba(244,106,34,0.5); box-shadow: 0 0 0 3px var(--accent-glow); }
+.note-spinner-wrap {
+  position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+  display: flex; align-items: center;
+}
+.note-spinner {
+  width: 16px; height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
 .form-input {
   padding: 11px 14px;
-  background: rgba(255,255,255,0.05); border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.03); border: 1px solid var(--border);
   border-radius: var(--radius-sm); color: var(--text);
   font-family: inherit; font-size: 14px; outline: none;
   transition: border 0.2s, box-shadow 0.2s; width: 100%;
 }
 .form-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
 .form-input::placeholder { color: var(--text-dim); }
+.form-input:disabled {
+  background: rgba(0, 0, 0, 0.08);
+  color: var(--text-dim);
+  cursor: not-allowed;
+  border-color: var(--border);
+}
 .form-select { cursor: pointer; }
-.form-select option { background: #1a1b23; color: var(--text); }
+.form-select option { background: #fff; color: var(--text); }
 .save-btn { width: 100%; padding: 13px; font-size: 15px; }
 
 /* TOOLBAR */
@@ -572,7 +800,7 @@ html, body {
 .search-icon { position: absolute; left: 12px; color: var(--text-muted); pointer-events: none; }
 .search-input {
   width: 100%; padding: 10px 36px;
-  background: rgba(255,255,255,0.05); border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.03); border: 1px solid var(--border);
   border-radius: var(--radius-sm); color: var(--text);
   font-family: inherit; font-size: 14px; outline: none;
   transition: border 0.2s, box-shadow 0.2s;
@@ -596,12 +824,12 @@ html, body {
   cursor: pointer; transition: all 0.2s; white-space: nowrap;
 }
 .sort-btn:hover { border-color: var(--border-hover); color: var(--text); }
-.sort-btn.active { background: rgba(124,58,237,0.2); border-color: rgba(124,58,237,0.5); color: #a78bfa; }
+.sort-btn.active { background: rgba(244, 106, 34, 0.1); border-color: rgba(244, 106, 34, 0.4); color: var(--accent); }
 
 /* RESULTS INFO */
 .results-info { font-size: 13px; color: var(--text-muted); padding: 0 4px; }
 .results-info strong { color: var(--text); }
-.results-info em { color: #a78bfa; font-style: normal; }
+.results-info em { color: var(--accent); font-style: normal; }
 
 /* LOADING */
 .loading-wrap {
@@ -622,7 +850,7 @@ html, body {
   padding: 60px 20px;
   text-align: center; color: var(--text-muted);
 }
-.empty-icon { font-size: 40px; margin-bottom: 12px; }
+.empty-icon { color: var(--text-dim); margin-bottom: 16px; display: flex; justify-content: center; }
 
 /* LINK CARDS */
 .links-list { display: flex; flex-direction: column; gap: 10px; }
@@ -631,8 +859,8 @@ html, body {
   padding: 18px 20px;
   transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
 }
-.link-card:hover { border-color: var(--border-hover); box-shadow: 0 4px 24px rgba(0,0,0,0.3); transform: translateY(-1px); }
-.link-card.editing { border-color: rgba(124,58,237,0.5); box-shadow: 0 0 0 1px rgba(124,58,237,0.2); }
+.link-card:hover { border-color: var(--border-hover); box-shadow: 0 4px 24px rgba(0,0,0,0.06); transform: translateY(-1px); }
+.link-card.editing { border-color: rgba(244, 106, 34, 0.4); box-shadow: 0 0 0 1px rgba(244, 106, 34, 0.1); }
 
 .card-top {
   display: flex; align-items: flex-start;
@@ -662,28 +890,28 @@ html, body {
   color: var(--text-muted);
 }
 .icon-btn:hover { border-color: var(--border-hover); color: var(--text); background: var(--surface-hover); }
-.edit-btn:hover { border-color: rgba(124,58,237,0.5); color: #a78bfa; }
+.edit-btn:hover { border-color: rgba(244, 106, 34, 0.4); color: var(--accent); }
 .delete-btn:hover { border-color: rgba(239,68,68,0.5); color: var(--red); background: rgba(239,68,68,0.08); }
 
 .card-links { display: flex; flex-direction: column; gap: 8px; }
 .link-row {
   display: flex; align-items: center; gap: 8px;
-  background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);
+  background: rgba(0, 0, 0, 0.02); border: 1px solid rgba(0, 0, 0, 0.05);
   border-radius: var(--radius-sm); padding: 8px 10px;
 }
 .link-label {
   font-size: 10px; font-weight: 800; letter-spacing: 0.08em;
   padding: 2px 7px; border-radius: 4px; flex-shrink: 0;
 }
-.link-label.base { background: rgba(59,130,246,0.15); color: #60a5fa; }
-.link-label.aff { background: rgba(16,185,129,0.15); color: #34d399; }
+.link-label.base { background: rgba(59,130,246,0.15); color: #3b82f6; }
+.link-label.aff { background: rgba(16,185,129,0.15); color: #10b981; }
 .link-url {
   flex: 1; font-size: 12px; color: var(--text-muted);
   text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   transition: color 0.2s;
 }
 .link-url:hover { color: var(--text); }
-.aff-url { color: #60a5fa !important; font-weight: 500; }
+.aff-url { color: #3b82f6 !important; font-weight: 500; }
 .no-aff { flex: 1; font-size: 12px; color: var(--amber); font-style: italic; }
 
 .copy-btn {
@@ -698,7 +926,7 @@ html, body {
 /* EDIT MODE */
 .edit-header {
   display: flex; align-items: center; gap: 8px;
-  font-size: 14px; font-weight: 600; color: #a78bfa;
+  font-size: 14px; font-weight: 600; color: var(--accent);
   margin-bottom: 14px; padding-bottom: 12px;
   border-bottom: 1px solid var(--border);
 }
