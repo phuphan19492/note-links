@@ -3,7 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="./icons.png" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <!-- Bật chế độ chạy toàn màn hình giống app native -->
     <meta name="apple-mobile-web-app-capable" content="yes">
     <!-- Cấu hình thanh trạng thái (status bar) -->
@@ -11,6 +12,24 @@
     <!-- Đường dẫn tới icon hiển thị trên màn hình iPhone -->
     <link rel="apple-touch-icon" href="./icons.png">
     <title>note-link</title>
+    <script>
+      // 1. Chặn phóng to khi búng 2 ngón tay (Pinch-to-zoom)
+        document.addEventListener('touchstart', function (event) {
+          if (event.touches.length > 1) {
+            event.preventDefault();
+          }
+        }, { passive: false });
+
+        // 2. Chặn phóng to khi chạm đúp (Double-tap to zoom)
+        let lastTouchEnd = 0;
+        document.addEventListener('touchend', function (event) {
+          const now = (new Date()).getTime();
+          if (now - lastTouchEnd <= 300) {
+            event.preventDefault();
+          }
+          lastTouchEnd = now;
+        }, { passive: false });
+    </script>
   </head>
   <body>
     <div id="app"></div>
